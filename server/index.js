@@ -7,32 +7,10 @@ const cors = require('cors');
 const pty = require('node-pty');
 const chokidar = require('chokidar');
 
-// Set the base user directory
+// Set the user directory
 const BASE_USER_DIR = path.resolve(process.env.INIT_CWD || __dirname, './user');
 
-// Create a custom shell script to restrict the user from going outside the provided folder
-const createRestrictedShellScript = (userDir) => `
-function cd() {
-    local target_dir
-    if [[ -z "$1" || "$1" == "." ]]; then
-        target_dir=$(pwd)
-    elif [[ "$1" == ".." ]]; then
-        target_dir=$(realpath "$(pwd)/..")
-    else
-        target_dir=$(realpath "$(pwd)/$1")
-    fi
-
-    # Ensure the target directory is within the user directory
-    if [[ $target_dir == ${userDir}* ]]; then
-        builtin cd "$target_dir"
-    else
-        echo "Access denied: Cannot navigate outside the user directory"
-    fi
-}
-PS1="restricted-shell$ "; export PS1
-cd "${userDir}"
-`;
-
+// Spawn a pseudo-terminal process with the restricted shell
 const app = express();
 const server = http.createServer(app);
 const io = new SocketServer({
@@ -78,33 +56,21 @@ io.on('connection', (socket) => {
     });
 
     const setupRestrictedShell = (userDir, socket) => {
-        // Create restricted shell script
-        const shellScript = createRestrictedShellScript(userDir);
+        const ptyProcess = pty.spawn('bash', ['--rcfile', path.join(userDir, '.restricted_bashrc')], {
+            name: 'xterm-color',
+            cols: 80,
+            rows: 30,
+            cwd: userDir, // Set initial working directory
+            env: { ...process.env, HOME: userDir }, // Restrict environment to userDir
+        });
 
-        // Write the shell script to the user's directory
-        fs.writeFile(path.join(userDir, '.restricted_bashrc'), shellScript, 'utf-8')
-            .then(() => {
-                // Spawn a pseudo-terminal process with the restricted shell
-                const ptyProcess = pty.spawn('bash', ['--rcfile', path.join(userDir, '.restricted_bashrc')], {
-                    name: 'xterm-color',
-                    cols: 80,
-                    rows: 30,
-                    cwd: userDir, // Set initial working directory
-                    env: { ...process.env, HOME: userDir }, // Restrict environment to userDir
-                });
+        ptyProcess.onData(data => {
+            socket.emit('terminal:data', data);
+        });
 
-                ptyProcess.onData(data => {
-                    socket.emit('terminal:data', data);
-                });
-
-                socket.on('terminal:write', (data) => {
-                    ptyProcess.write(data);
-                });
-            })
-            .catch(err => {
-                console.error('Error writing restricted shell script:', err);
-                socket.emit('terminal:data', 'Error initializing restricted shell\n');
-            });
+        socket.on('terminal:write', (data) => {
+            ptyProcess.write(data);
+        });
     };
 
     socket.on('file:change', async ({ path: filePath, content }) => {
@@ -118,38 +84,23 @@ io.on('connection', (socket) => {
     });
 });
 
-// Serve file tree for the user's directory
+// Serve file tree
 app.get('/files', async (req, res) => {
-    const passkey = req.query.passkey;
-    const userDir = path.join(BASE_USER_DIR, passkey);
-
-    if (!fs.existsSync(userDir)) {
-        return res.status(403).json({ error: 'Access denied: User folder not found' });
-    }
-
-    const fileTree = await generateFileTree(userDir);
+    const fileTree = await generateFileTree(BASE_USER_DIR);
     return res.json({ tree: fileTree });
 });
 
-// Serve file content from the user's folder
+// Serve file content
 app.get('/files/content', async (req, res) => {
-    const passkey = req.query.passkey;
-    const userDir = path.join(BASE_USER_DIR, passkey);
-    const filePath = path.resolve(userDir, `.${req.query.path}`);
-
-    if (!filePath.startsWith(userDir)) {
-        return res.status(403).json({ error: 'Access denied: Cannot access files outside your folder' });
+    const filePath = path.resolve(BASE_USER_DIR, `.${req.query.path}`);
+    if (!filePath.startsWith(BASE_USER_DIR)) {
+        return res.status(403).json({ error: 'Access denied' });
     }
-
-    try {
-        const content = await fs.readFile(filePath, 'utf-8');
-        return res.json({ content });
-    } catch (error) {
-        return res.status(500).json({ error: 'Failed to read file content' });
-    }
+    const content = await fs.readFile(filePath, 'utf-8');
+    return res.json({ content });
 });
 
-server.listen(9000, '0.0.0.0', () => console.log(`🐳 Server running on port 9000`));
+server.listen(9000, () => console.log(`🐳 Server running on port 9000`));
 
 // Function to generate the file tree
 async function generateFileTree(directory) {

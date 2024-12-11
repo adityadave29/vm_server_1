@@ -9,6 +9,7 @@ import "ace-builds/src-noconflict/mode-javascript";
 import "ace-builds/src-noconflict/theme-github";
 import "ace-builds/src-noconflict/ext-language_tools";
 
+
 function App() {
   const [fileTree, setFileTree] = useState({});
   const [selectedFile, setSelectedFile] = useState("");
@@ -21,7 +22,7 @@ function App() {
   const isSaved = selectedFileContent === code;
 
   const getFileTree = async () => {
-    const response = await fetch(`http://10.1.241.232:9000/files?passkey=${passkey}`);
+    const response = await fetch("http://10.1.241.232:9000/files");
     const result = await response.json();
     setFileTree(result.tree);
   };
@@ -29,11 +30,11 @@ function App() {
   const getFileContents = useCallback(async () => {
     if (!selectedFile) return;
     const response = await fetch(
-      `http://10.1.241.232:9000/files/content?passkey=${passkey}&path=${selectedFile}`
+      `http://10.1.241.232:9000/files/content?path=${selectedFile}`
     );
     const result = await response.json();
     setSelectedFileContent(result.content);
-  }, [selectedFile, passkey]);
+  }, [selectedFile]);
 
   useEffect(() => {
     if (passkey) {
