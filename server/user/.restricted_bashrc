@@ -1,0 +1,20 @@
+
+function cd() {
+    local target_dir
+    if [[ -z "$1" || "$1" == "." ]]; then
+        target_dir=$(pwd)
+    elif [[ "$1" == ".." ]]; then
+        target_dir=$(realpath "$(pwd)/..")
+    else
+        target_dir=$(realpath "$(pwd)/$1")
+    fi
+
+    # Ensure the target directory is within the user directory
+    if [[ $target_dir == /Users/adityadave/Desktop/Cloud/ground/server/user* ]]; then
+        builtin cd "$target_dir"
+    else
+        echo "Access denied: Cannot navigate outside the user directory"
+    fi
+}
+PS1="restricted-shell$ "; export PS1
+cd "/Users/adityadave/Desktop/Cloud/ground/server/user"
