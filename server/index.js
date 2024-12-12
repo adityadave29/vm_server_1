@@ -8,11 +8,47 @@ const pty = require('node-pty');
 const chokidar = require('chokidar');
 
 // Set the user directory
-const BASE_USER_DIR = path.resolve(process.env.INIT_CWD || __dirname, './user');
+const USER_DIR = path.resolve(process.env.INIT_CWD || __dirname, './user');
+
+// Create a custom shell script to override the cd command
+const customShellScript = `
+function cd() {
+    local target_dir
+    if [[ -z "$1" || "$1" == "." ]]; then
+        target_dir=$(pwd)
+    elif [[ "$1" == ".." ]]; then
+        target_dir=$(realpath "$(pwd)/..")
+    else
+        target_dir=$(realpath "$(pwd)/$1")
+    fi
+
+    # Ensure the target directory is within the user directory
+    if [[ $target_dir == ${USER_DIR}* ]]; then
+        builtin cd "$target_dir"
+    else
+        echo "Access denied: Cannot navigate outside the user directory"
+    fi
+}
+PS1="restricted-shell$ "; export PS1
+cd "${USER_DIR}"
+`;
+
+(async () => {
+    await fs.writeFile(path.join(USER_DIR, '.restricted_bashrc'), customShellScript, 'utf-8');
+})();
 
 // Spawn a pseudo-terminal process with the restricted shell
+const ptyProcess = pty.spawn('bash', ['--rcfile', path.join(USER_DIR, '.restricted_bashrc')], {
+    name: 'xterm-color',
+    cols: 80,
+    rows: 30,
+    cwd: USER_DIR, // Set initial working directory
+    env: { ...process.env, HOME: USER_DIR }, // Restrict environment to USER_DIR
+});
+
 const app = express();
 const server = http.createServer(app);
+
 const io = new SocketServer({
     cors: '*', // Allow CORS
 });
@@ -21,61 +57,30 @@ app.use(cors());
 io.attach(server);
 
 // Watch for file changes in the user directory and notify clients
-chokidar.watch(BASE_USER_DIR).on('all', (event, filePath) => {
-    io.emit('file:refresh', path.relative(BASE_USER_DIR, filePath));
+chokidar.watch(USER_DIR).on('all', (event, filePath) => {
+    io.emit('file:refresh', path.relative(USER_DIR, filePath));
+});
+
+// Handle data from the terminal
+ptyProcess.onData(data => {
+    io.emit('terminal:data', data);
 });
 
 io.on('connection', (socket) => {
     console.log(`Socket connected:`, socket.id);
 
-    // Request passkey from the client when they connect
-    socket.emit('request:passkey');
+    socket.emit('file:refresh');
 
-    socket.on('passkey:submitted', async (passkey) => {
-        const userDir = path.join(BASE_USER_DIR, passkey);
+    socket.on('terminal:write', (data) => {
+        console.log('Terminal input:', data);
 
-        try {
-            const dirExists = await fs.stat(userDir).catch(() => false);
-
-            if (dirExists) {
-                // If directory exists, open the folder
-                console.log(`Directory exists: ${userDir}`);
-                socket.emit('passkey:accepted', `Welcome back! Folder opened: ${passkey}`);
-                setupRestrictedShell(userDir, socket);
-            } else {
-                // If directory doesn't exist, create it
-                await fs.mkdir(userDir, { recursive: true });
-                console.log(`Created new directory: ${userDir}`);
-                socket.emit('passkey:accepted', `Directory created for passkey: ${passkey}`);
-                setupRestrictedShell(userDir, socket);
-            }
-        } catch (error) {
-            console.error('Error handling passkey:', error);
-            socket.emit('passkey:error', 'Failed to process passkey');
-        }
+        // Pass input directly to the pty process
+        ptyProcess.write(data);
     });
 
-    const setupRestrictedShell = (userDir, socket) => {
-        const ptyProcess = pty.spawn('bash', ['--rcfile', path.join(userDir, '.restricted_bashrc')], {
-            name: 'xterm-color',
-            cols: 80,
-            rows: 30,
-            cwd: userDir, // Set initial working directory
-            env: { ...process.env, HOME: userDir }, // Restrict environment to userDir
-        });
-
-        ptyProcess.onData(data => {
-            socket.emit('terminal:data', data);
-        });
-
-        socket.on('terminal:write', (data) => {
-            ptyProcess.write(data);
-        });
-    };
-
     socket.on('file:change', async ({ path: filePath, content }) => {
-        const absolutePath = path.resolve(BASE_USER_DIR, filePath);
-        if (!absolutePath.startsWith(BASE_USER_DIR)) {
+        const absolutePath = path.resolve(USER_DIR, `.${filePath}`);
+        if (!absolutePath.startsWith(USER_DIR)) {
             console.log('Unauthorized file access attempt:', absolutePath);
             socket.emit('terminal:data', 'Access denied: Cannot access files outside the user directory\n');
             return;
@@ -86,21 +91,21 @@ io.on('connection', (socket) => {
 
 // Serve file tree
 app.get('/files', async (req, res) => {
-    const fileTree = await generateFileTree(BASE_USER_DIR);
+    const fileTree = await generateFileTree(USER_DIR);
     return res.json({ tree: fileTree });
 });
 
 // Serve file content
 app.get('/files/content', async (req, res) => {
-    const filePath = path.resolve(BASE_USER_DIR, `.${req.query.path}`);
-    if (!filePath.startsWith(BASE_USER_DIR)) {
+    const filePath = path.resolve(USER_DIR, `.${req.query.path}`);
+    if (!filePath.startsWith(USER_DIR)) {
         return res.status(403).json({ error: 'Access denied' });
     }
     const content = await fs.readFile(filePath, 'utf-8');
     return res.json({ content });
 });
 
-server.listen(9000, '0.0.0.0',() => console.log(`🐳 Server running on port 9000`));
+server.listen(9000, () => console.log(`🐳 Server running on port 9000`));
 
 // Function to generate the file tree
 async function generateFileTree(directory) {
@@ -125,3 +130,4 @@ async function generateFileTree(directory) {
     await buildTree(directory, tree);
     return tree;
 }
+
